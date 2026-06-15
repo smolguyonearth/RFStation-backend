@@ -6,6 +6,7 @@
     "dev": "bun run --watch src/index.ts"
   },
   "dependencies": {
+    "@supabase/supabase-js": "^2.108.1",
     "elysia": "latest"
   },
   "devDependencies": {
