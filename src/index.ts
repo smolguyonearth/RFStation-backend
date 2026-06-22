@@ -12,41 +12,45 @@ const app = new Elysia()
     const { device_code, nearest_device, rssi, zone_code } = body;
     const isNearestValid = nearest_device !== "X";
 
-    // 1. Ensure devices exist
-    const { error: e1 } = await supabase.from('devices').upsert([{ device_code }]);
-    if (e1) console.error('❌ devices upsert:', e1.message);
-
-    if (isNearestValid) {
-      const { error: e2 } = await supabase.from('devices').upsert([{ device_code: nearest_device }]);
-      if (e2) console.error('❌ nearest device upsert:', e2.message);
-    }
-
-    // 2. Update current status
-    const { error: e3 } = await supabase.from('device_status').upsert([{
-      device_code, zone_code,
-      nearest_device: isNearestValid ? nearest_device : null,
-      latest_rssi: rssi
-    }]);
-    if (e3) console.error('❌ device_status upsert:', e3.message);
-
-    // 3. Log history
-    const { error: e4 } = await supabase.from('device_history').insert([{
-      device_code, zone_code,
-      nearest_device: isNearestValid ? nearest_device : null, rssi
-    }]);
-    if (e4) console.error('❌ device_history insert:', e4.message);
-
-    // Check if any DB operation failed
-    const dbErrors = [e1, e3, e4].filter(Boolean);
-    if (dbErrors.length > 0) {
-      console.error('⚠️ Some DB writes failed. Check RLS policies or use the service_role key.');
-      return { success: false, errors: dbErrors.map(e => e!.message) };
-    }
-
-    // 4. Broadcast to React frontend
+    // 1. Broadcast to frontend FIRST (instant, no DB wait)
     server?.publish('live-data', JSON.stringify(body));
-    console.log('✅ Ingested:', device_code);
 
+    // 2. Run all DB operations in parallel
+    const [devicesResult, nearestResult, statusResult, historyResult] = await Promise.all([
+      // Ensure device exists
+      supabase.from('devices').upsert([{ device_code }]),
+      // Ensure nearest device exists
+      isNearestValid
+        ? supabase.from('devices').upsert([{ device_code: nearest_device }])
+        : Promise.resolve({ error: null }),
+      // Update current status
+      supabase.from('device_status').upsert([{
+        device_code, zone_code,
+        nearest_device: isNearestValid ? nearest_device : null,
+        latest_rssi: rssi
+      }]),
+      // Log history
+      supabase.from('device_history').insert([{
+        device_code, zone_code,
+        nearest_device: isNearestValid ? nearest_device : null, rssi
+      }])
+    ]);
+
+    // 3. Check for errors
+    const errors = [
+      devicesResult.error,
+      nearestResult.error,
+      statusResult.error,
+      historyResult.error
+    ].filter(Boolean);
+
+    if (errors.length > 0) {
+      errors.forEach(e => console.error('❌ DB error:', e!.message));
+      console.error('⚠️ Some DB writes failed. Check RLS policies or use the service_role key.');
+      return { success: false, errors: errors.map(e => e!.message) };
+    }
+
+    console.log('✅ Ingested:', device_code);
     return { success: true }
   }, {
     body: t.Object({
