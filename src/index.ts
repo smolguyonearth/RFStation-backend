@@ -9,29 +9,26 @@ const app = new Elysia()
     }
   })
   .post('/api/ingest', async ({ body, server }) => {
-    const { device_code, nearest_device, rssi, zone_code } = body;
+    const { device_code, nearest_device, rssi, zone_code} = body;
     const isNearestValid = nearest_device !== "X";
 
     // 1. Broadcast to frontend FIRST (instant, no DB wait)
     server?.publish('live-data', JSON.stringify(body));
 
     // 2. Run all DB operations in parallel
-    const [devicesResult, nearestResult, statusResult, historyResult] = await Promise.all([
+    const [devicesResult, statusResult, historyResult] = await Promise.all([
       // Ensure device exists
       supabase.from('devices').upsert([{ device_code }]),
-      // Ensure nearest device exists
-      isNearestValid
-        ? supabase.from('devices').upsert([{ device_code: nearest_device }])
-        : Promise.resolve({ error: null }),
+
       // Update current status
       supabase.from('device_status').upsert([{
-        device_code, zone_code,
+        device_code,
         nearest_device: isNearestValid ? nearest_device : null,
         latest_rssi: rssi
       }]),
       // Log history
       supabase.from('device_history').insert([{
-        device_code, zone_code,
+        device_code,
         nearest_device: isNearestValid ? nearest_device : null, rssi
       }])
     ]);
@@ -39,7 +36,6 @@ const app = new Elysia()
     // 3. Check for errors
     const errors = [
       devicesResult.error,
-      nearestResult.error,
       statusResult.error,
       historyResult.error
     ].filter(Boolean);
@@ -57,7 +53,7 @@ const app = new Elysia()
       device_code: t.String(),
       nearest_device: t.String(),
       rssi: t.Number(),
-      zone_code: t.String()
+      zone_code: t.Optional(t.String())
     })
   })
   .listen({ port: 3000, hostname: '0.0.0.0' })
