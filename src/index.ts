@@ -1,39 +1,75 @@
 import { Elysia, t } from 'elysia'
 import { supabase } from './lib/supabase'
+import { GameLogic } from './gameLogic'
+
+const game = new GameLogic()
 
 const app = new Elysia()
-  // LED Matrix State (2 rows, 3 cols) - 0: empty, 1: player1, 2: player2
-  .state('ledMatrix', Array(2).fill(0).map(() => Array(3).fill(0)))
   .ws('/ws', {
     open(ws) {
       ws.subscribe('live-data')
       console.log('Frontend connected to WebSocket')
     }
   })
-  // --- LED Matrix Endpoints ---
-  .get('/api/led/status', ({ store }) => {
-    return { success: true, matrix: store.ledMatrix };
+  // --- Game Endpoints ---
+  .get('/api/game/status', () => {
+    return { success: true, game: game.getSnapshot() };
   })
-  .get('/api/led/status/raw', ({ store }) => {
+  .get('/api/led/status/raw', () => {
     // Returns comma separated string: row0col0,row0col1...
-    return store.ledMatrix.flat().join(',');
+    return game.matrix.flat().join(',');
   })
-  .post('/api/led/update', ({ body, store, server }) => {
-    const { row, col, owner } = body;
-    
-    if (row >= 0 && row < 2 && col >= 0 && col < 3) {
-      store.ledMatrix[row][col] = owner;
-      // Broadcast new LED state to frontend simulation
-      server?.publish('live-data', JSON.stringify({ type: 'led_update', matrix: store.ledMatrix }));
-      return { success: true, matrix: store.ledMatrix };
-    }
-    
-    return { success: false, error: 'Invalid coordinates' };
+  .post('/api/game/start', ({ body, server }) => {
+    game.startGame(body.startingPlayer);
+    server?.publish('live-data', JSON.stringify({ type: 'game_update', game: game.getSnapshot() }));
+    return { success: true };
   }, {
     body: t.Object({
-      row: t.Number(),
-      col: t.Number(),
-      owner: t.Number() // 0, 1, or 2
+      startingPlayer: t.Number()
+    })
+  })
+  .post('/api/game/resolve', ({ body, server }) => {
+    game.resolveBattle(body.winner);
+    server?.publish('live-data', JSON.stringify({ type: 'game_update', game: game.getSnapshot() }));
+    return { success: true };
+  }, {
+    body: t.Object({
+      winner: t.Number()
+    })
+  })
+  .post('/api/game/reset', ({ server }) => {
+    game.resetGame();
+    server?.publish('live-data', JSON.stringify({ type: 'game_update', game: game.getSnapshot() }));
+    // Tell ESP32 to clear via websocket event? ESP32 only polls /api/led/status/raw!
+    // That's fine, ESP32 will pick up the 0,0,0,0,0,0 on next poll.
+    return { success: true };
+  })
+  .post('/api/action', ({ body, server }) => {
+    const { button_id } = body;
+    
+    // Map button_id (0-5) to row/col
+    if (button_id >= 0 && button_id < 6) {
+      const row = Math.floor(button_id / 3);
+      const col = button_id % 3;
+      
+      console.log(`🔘 Button pressed: ${button_id} (Place [${row},${col}])`);
+      
+      // Pass to game logic
+      const changed = game.handleAction(row, col);
+      
+      if (changed) {
+        // Broadcast to frontend
+        server?.publish('live-data', JSON.stringify({ type: 'game_update', game: game.getSnapshot() }));
+      }
+      
+      // Always return raw state back to ESP32 for instant sync
+      return game.matrix.flat().join(',');
+    }
+    
+    return "INVALID";
+  }, {
+    body: t.Object({
+      button_id: t.Number()
     })
   })
   // --- Existing Ingest Endpoint ---
