@@ -2,12 +2,41 @@ import { Elysia, t } from 'elysia'
 import { supabase } from './lib/supabase'
 
 const app = new Elysia()
+  // LED Matrix State (2 rows, 3 cols) - 0: empty, 1: player1, 2: player2
+  .state('ledMatrix', Array(2).fill(0).map(() => Array(3).fill(0)))
   .ws('/ws', {
     open(ws) {
       ws.subscribe('live-data')
       console.log('Frontend connected to WebSocket')
     }
   })
+  // --- LED Matrix Endpoints ---
+  .get('/api/led/status', ({ store }) => {
+    return { success: true, matrix: store.ledMatrix };
+  })
+  .get('/api/led/status/raw', ({ store }) => {
+    // Returns comma separated string: row0col0,row0col1...
+    return store.ledMatrix.flat().join(',');
+  })
+  .post('/api/led/update', ({ body, store, server }) => {
+    const { row, col, owner } = body;
+    
+    if (row >= 0 && row < 2 && col >= 0 && col < 3) {
+      store.ledMatrix[row][col] = owner;
+      // Broadcast new LED state to frontend simulation
+      server?.publish('live-data', JSON.stringify({ type: 'led_update', matrix: store.ledMatrix }));
+      return { success: true, matrix: store.ledMatrix };
+    }
+    
+    return { success: false, error: 'Invalid coordinates' };
+  }, {
+    body: t.Object({
+      row: t.Number(),
+      col: t.Number(),
+      owner: t.Number() // 0, 1, or 2
+    })
+  })
+  // --- Existing Ingest Endpoint ---
   .post('/api/ingest', async ({ body, server }) => {
     const { device_code, nearest_device, rssi, zone_code} = body;
     const isNearestValid = nearest_device !== "X";
