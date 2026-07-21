@@ -1,5 +1,6 @@
 import { Elysia, t } from 'elysia'
-import { supabase } from './lib/supabase'
+// [DB DISABLED] Database is disabled. To re-enable, see docs/DB_ACTIVATE.md
+// import { supabase } from './lib/supabase'
 import { GameLogic } from './gameLogic'
 
 const game = new GameLogic()
@@ -46,72 +47,62 @@ const app = new Elysia()
   })
   .post('/api/action', ({ body, server }) => {
     const { button_id } = body;
-    
+
     // Map button_id (0-5) to row/col
     if (button_id >= 0 && button_id < 6) {
       const row = Math.floor(button_id / 3);
       const col = button_id % 3;
-      
+
       console.log(`🔘 Button pressed: ${button_id} (Place [${row},${col}])`);
-      
+
       // Pass to game logic
       const changed = game.handleAction(row, col);
-      
+
       if (changed) {
         // Broadcast to frontend
         server?.publish('live-data', JSON.stringify({ type: 'game_update', game: game.getSnapshot() }));
       }
-      
+
       // Always return raw state back to ESP32 for instant sync
       return game.matrix.flat().join(',');
     }
-    
+
     return "INVALID";
   }, {
     body: t.Object({
       button_id: t.Number()
     })
   })
-  // --- Existing Ingest Endpoint ---
-  .post('/api/ingest', async ({ body, server }) => {
-    const { device_code, nearest_device, rssi, zone_code} = body;
-    const isNearestValid = nearest_device !== "X";
-
-    // 1. Broadcast to frontend FIRST (instant, no DB wait)
+  // --- Ingest Endpoint (Pass-through: receive → broadcast → done) ---
+  .post('/api/ingest', ({ body, server }) => {
+    // Broadcast to all connected frontends via WebSocket (instant, in-memory)
     server?.publish('live-data', JSON.stringify(body));
 
-    // 2. Run all DB operations in parallel
-    const [devicesResult, statusResult, historyResult] = await Promise.all([
-      // Ensure device exists
-      supabase.from('devices').upsert([{ device_code }]),
+    // [DB DISABLED] Database writes are disabled.
+    // To re-enable persistent storage, see docs/DB_ACTIVATE.md
+    // --- Original DB code below ---
+    // const { device_code, nearest_device, rssi, zone_code } = body;
+    // const isNearestValid = nearest_device !== "X";
+    //
+    // const [devicesResult, statusResult, historyResult] = await Promise.all([
+    //   supabase.from('devices').upsert([{ device_code }]),
+    //   supabase.from('device_status').upsert([{
+    //     device_code,
+    //     nearest_device: isNearestValid ? nearest_device : null,
+    //     latest_rssi: rssi
+    //   }]),
+    //   supabase.from('device_history').insert([{
+    //     device_code,
+    //     nearest_device: isNearestValid ? nearest_device : null, rssi
+    //   }])
+    // ]);
+    //
+    // const errors = [devicesResult.error, statusResult.error, historyResult.error].filter(Boolean);
+    // if (errors.length > 0) {
+    //   errors.forEach(e => console.error('❌ DB error:', e!.message));
+    //   return { success: false, errors: errors.map(e => e!.message) };
+    // }
 
-      // Update current status
-      supabase.from('device_status').upsert([{
-        device_code,
-        nearest_device: isNearestValid ? nearest_device : null,
-        latest_rssi: rssi
-      }]),
-      // Log history
-      supabase.from('device_history').insert([{
-        device_code,
-        nearest_device: isNearestValid ? nearest_device : null, rssi
-      }])
-    ]);
-
-    // 3. Check for errors
-    const errors = [
-      devicesResult.error,
-      statusResult.error,
-      historyResult.error
-    ].filter(Boolean);
-
-    if (errors.length > 0) {
-      errors.forEach(e => console.error('❌ DB error:', e!.message));
-      console.error('⚠️ Some DB writes failed. Check RLS policies or use the service_role key.');
-      return { success: false, errors: errors.map(e => e!.message) };
-    }
-
-    console.log('✅ Ingested:', device_code);
     return { success: true }
   }, {
     body: t.Object({
