@@ -12,15 +12,25 @@ const app = new Elysia()
       console.log('Frontend connected to WebSocket')
     }
   })
-  // --- Game Endpoints ---
+  // --- Game/Controller Endpoints ---
   .get('/api/game/status', () => {
     return { success: true, game: game.getSnapshot() };
   })
   .get('/api/led/status/raw', () => {
-    // Returns comma separated string: row0col0,row0col1...
-    return game.matrix.flat().join(',');
+    // Return pendingMatrix so Arduino sees instant updates (like battle blinking)
+    return game.pendingMatrix.flat().join(',');
   })
-  .post('/api/game/start', ({ body, server }) => {
+  .post('/api/controller/mode', ({ body, server }) => {
+    game.setMode(body.mode as any, body.language as any);
+    server?.publish('live-data', JSON.stringify({ type: 'game_update', game: game.getSnapshot() }));
+    return { success: true };
+  }, {
+    body: t.Object({
+      mode: t.String(),
+      language: t.Optional(t.String())
+    })
+  })
+  .post('/api/controller/start', ({ body, server }) => {
     game.startGame(body.startingPlayer);
     server?.publish('live-data', JSON.stringify({ type: 'game_update', game: game.getSnapshot() }));
     return { success: true };
@@ -28,6 +38,11 @@ const app = new Elysia()
     body: t.Object({
       startingPlayer: t.Number()
     })
+  })
+  .post('/api/controller/endturn', ({ server }) => {
+    game.endTurn();
+    server?.publish('live-data', JSON.stringify({ type: 'game_update', game: game.getSnapshot() }));
+    return { success: true };
   })
   .post('/api/game/resolve', ({ body, server }) => {
     game.resolveBattle(body.winner);
@@ -41,8 +56,6 @@ const app = new Elysia()
   .post('/api/game/reset', ({ server }) => {
     game.resetGame();
     server?.publish('live-data', JSON.stringify({ type: 'game_update', game: game.getSnapshot() }));
-    // Tell ESP32 to clear via websocket event? ESP32 only polls /api/led/status/raw!
-    // That's fine, ESP32 will pick up the 0,0,0,0,0,0 on next poll.
     return { success: true };
   })
   .post('/api/action', ({ body, server }) => {
@@ -59,12 +72,12 @@ const app = new Elysia()
       const changed = game.handleAction(row, col);
 
       if (changed) {
-        // Broadcast to frontend
+        // Broadcast to frontend (Monitor/Controller)
         server?.publish('live-data', JSON.stringify({ type: 'game_update', game: game.getSnapshot() }));
       }
 
-      // Always return raw state back to ESP32 for instant sync
-      return game.matrix.flat().join(',');
+      // Always return pending state back to ESP32 for instant LED sync
+      return game.pendingMatrix.flat().join(',');
     }
 
     return "INVALID";

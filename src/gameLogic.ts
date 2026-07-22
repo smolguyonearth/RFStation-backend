@@ -1,111 +1,163 @@
-export type GameState = 'setup' | 'playing' | 'battle' | 'game_over';
+export type AppMode = 'IDLE' | 'MUSEUM' | 'GAME';
+export type Language = 'EN' | 'TH' | 'DE';
+export type GamePhase = 'INIT' | 'TURN' | 'BATTLE' | 'END';
 
 export class GameLogic {
-  state: GameState = 'setup';
+  mode: AppMode = 'IDLE';
+  language: Language = 'EN';
+  
+  // --- Game State ---
+  gamePhase: GamePhase = 'INIT';
   currentPlayer: number = 1;
-  turnsLeft: number = 10;
-  turnPhase: number = 0;
-  matrix: number[][] = Array(2).fill(0).map(() => Array(3).fill(0));
+  
+  // We keep two matrices: 
+  // 1. pendingMatrix: Immediately updated on physical button press (for Arduino LEDs & Controller)
+  // 2. displayMatrix: Only updated when "End Turn" is pressed (for the Monitor)
+  pendingMatrix: number[][] = this.createEmptyMatrix();
+  displayMatrix: number[][] = this.createEmptyMatrix();
+  
   battleContext: { row: number, col: number } | null = null;
   scores = { 1: 0, 2: 0 };
+  
+  // --- Museum State ---
+  activeMuseumLocation: { row: number, col: number } | null = null;
+
+  private createEmptyMatrix() {
+    return Array(2).fill(0).map(() => Array(3).fill(0));
+  }
+
+  setMode(mode: AppMode, language: Language = 'EN') {
+    this.mode = mode;
+    this.language = language;
+    if (mode === 'GAME') {
+      this.resetGame();
+    } else if (mode === 'MUSEUM') {
+      this.activeMuseumLocation = null;
+      this.pendingMatrix = this.createEmptyMatrix();
+      this.displayMatrix = this.createEmptyMatrix();
+    } else {
+      this.pendingMatrix = this.createEmptyMatrix();
+      this.displayMatrix = this.createEmptyMatrix();
+    }
+  }
+
+  // --- Game Mode Methods ---
 
   startGame(startingPlayer: number) {
-    this.state = 'playing';
+    this.mode = 'GAME';
+    this.gamePhase = 'TURN';
     this.currentPlayer = startingPlayer;
-    this.turnsLeft = 10;
-    this.turnPhase = 0;
-    this.matrix = Array(2).fill(0).map(() => Array(3).fill(0));
+    this.pendingMatrix = this.createEmptyMatrix();
+    this.displayMatrix = this.createEmptyMatrix();
     this.battleContext = null;
     this.scores = { 1: 0, 2: 0 };
   }
 
   resetGame() {
-    this.state = 'setup';
+    this.mode = 'GAME';
+    this.gamePhase = 'INIT';
     this.currentPlayer = 1;
-    this.turnsLeft = 10;
-    this.turnPhase = 0;
-    this.matrix = Array(2).fill(0).map(() => Array(3).fill(0));
+    this.pendingMatrix = this.createEmptyMatrix();
+    this.displayMatrix = this.createEmptyMatrix();
     this.battleContext = null;
     this.scores = { 1: 0, 2: 0 };
   }
 
+  endTurn() {
+    if (this.mode !== 'GAME') return;
+    
+    // Sync the display matrix with pending matrix
+    this.displayMatrix = JSON.parse(JSON.stringify(this.pendingMatrix));
+    
+    if (this.gamePhase === 'BATTLE') {
+      // Cannot end turn during battle
+      return;
+    }
+
+    this.checkGameOver();
+    if (this.gamePhase !== 'END') {
+      this.currentPlayer = this.currentPlayer === 1 ? 2 : 1;
+    }
+  }
+
+  resolveBattle(winner: number) {
+    if (this.gamePhase !== 'BATTLE' || !this.battleContext) return;
+    
+    const { row, col } = this.battleContext;
+    this.pendingMatrix[row][col] = winner;
+    this.gamePhase = 'TURN';
+    this.battleContext = null;
+    
+    // Auto-end turn after battle resolution
+    this.endTurn();
+  }
+
+  private checkGameOver() {
+    let p1 = 0; let p2 = 0; let empty = 0;
+    for (let r = 0; r < 2; r++) {
+      for (let c = 0; c < 3; c++) {
+        const val = this.pendingMatrix[r][c];
+        if (val === 1) p1++;
+        else if (val === 2) p2++;
+        else empty++;
+      }
+    }
+    this.scores = { 1: p1, 2: p2 };
+    if (empty === 0) {
+      this.gamePhase = 'END';
+    }
+  }
+
+  // --- Physical Button Ingestion ---
+
   handleAction(row: number, col: number): boolean {
-    if (this.state !== 'playing') return false; // Ignore actions if not playing
-
-    const currentOwner = this.matrix[row][col];
-    
-    // Rule: Claim empty spot
-    if (currentOwner === 0) {
-      this.matrix[row][col] = this.currentPlayer;
-      this.finishTurn();
-      return true;
-    }
-    
-    // Rule: Battle (clicking opponent's spot)
-    if (currentOwner !== 0 && currentOwner !== this.currentPlayer && currentOwner !== 3) {
-      this.state = 'battle';
-      this.matrix[row][col] = 3; // 3 denotes battle mode (blinking)
-      this.battleContext = { row, col };
+    if (this.mode === 'MUSEUM') {
+      // In museum mode, clicking a button sets it as active
+      this.activeMuseumLocation = { row, col };
+      
+      // Light up ONLY this button on the Arduino (by making it "owned by P1")
+      // Clear matrix, set one spot
+      this.pendingMatrix = this.createEmptyMatrix();
+      this.pendingMatrix[row][col] = 1; 
+      
+      // Museum mode syncs instantly to monitor
+      this.displayMatrix = JSON.parse(JSON.stringify(this.pendingMatrix));
       return true;
     }
 
-    // Rule: Pass turn (clicking own spot)
-    if (currentOwner === this.currentPlayer) {
-      this.finishTurn();
-      return true;
+    if (this.mode === 'GAME' && this.gamePhase === 'TURN') {
+      const currentOwner = this.pendingMatrix[row][col];
+      
+      // Empty spot -> claim
+      if (currentOwner === 0) {
+        this.pendingMatrix[row][col] = this.currentPlayer;
+        this.endTurn(); // Auto-end turn on capture
+        return true;
+      }
+      
+      // Opponent spot -> battle
+      if (currentOwner !== 0 && currentOwner !== this.currentPlayer && currentOwner !== 3) {
+        this.gamePhase = 'BATTLE';
+        this.pendingMatrix[row][col] = 3; // 3 = blinking on Arduino
+        this.battleContext = { row, col };
+        return true;
+      }
     }
 
     return false;
   }
 
-  resolveBattle(winner: number) {
-    if (this.state !== 'battle' || !this.battleContext) return;
-    
-    const { row, col } = this.battleContext;
-    this.matrix[row][col] = winner;
-    this.state = 'playing';
-    this.battleContext = null;
-    
-    this.finishTurn();
-  }
-
-  private finishTurn() {
-    if (this.turnPhase === 1) {
-      this.turnsLeft--;
-      this.turnPhase = 0;
-    } else {
-      this.turnPhase = 1;
-    }
-
-    if (this.turnsLeft <= 0) {
-      this.state = 'game_over';
-      this.calculateScores();
-    } else {
-      // Swap turn
-      this.currentPlayer = this.currentPlayer === 1 ? 2 : 1;
-    }
-  }
-
-  private calculateScores() {
-    let p1 = 0;
-    let p2 = 0;
-    for (let r = 0; r < 2; r++) {
-      for (let c = 0; c < 3; c++) {
-        if (this.matrix[r][c] === 1) p1++;
-        if (this.matrix[r][c] === 2) p2++;
-      }
-    }
-    this.scores = { 1: p1, 2: p2 };
-  }
-
   getSnapshot() {
     return {
-      state: this.state,
+      mode: this.mode,
+      language: this.language,
+      gamePhase: this.gamePhase,
       currentPlayer: this.currentPlayer,
-      turnsLeft: this.turnsLeft,
-      matrix: this.matrix,
+      displayMatrix: this.displayMatrix, 
+      pendingMatrix: this.pendingMatrix, // Sent so Controller knows the truth
       battleContext: this.battleContext,
-      scores: this.scores
+      scores: this.scores,
+      activeMuseumLocation: this.activeMuseumLocation
     };
   }
 }
